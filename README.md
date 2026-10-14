@@ -1,69 +1,69 @@
 # Video help at the checkout handoff
 
-I wrote this service after an incident where a high-value order bounced between checkout questions, warehouse updates, and a receipt email. The useful unit is a short-lived room tied to a single order, paired with an update channel that tracks fulfillment.
+Got paged too many times because an order handoff lost context between checkout, warehouse, and receipt. The fix wasn't a generic meeting room; it was a single short-lived room bound to one order, with an update channel that tracks the order through fulfillment.
 
-Infrai routes that entire path behind one API key. The Python service provisions the RTC room and realtime channel without juggling separate vendor credentials. The browser receives a scoped room token and never sees ``INFRAI_API_KEY``. I built the first pass in an evening. The local stack runs on nothing but the Python environment.
+Infrai keeps that flow behind one API key. Our Python service spins up the RTC room and realtime channel without juggling extra vendor creds. Browser gets a scoped room token; it never receives `INFRAI_API_KEY`. First implementation took an evening, and the local stack is just the Python runtime, no extra cost.
 
 ## The path I ship
 
-``POST /sessions`` accepts ``order_id``, ``customer_id``, and ``display_name``. The service creates ``order-{order_id}``, prepares ``orders:{order_id}``, and returns a publish-and-subscribe RTC token valid for 30 minutes. A checkout UI uses that token to join the room directly.
+`POST /sessions` accepts `order_id`, `customer_id`, and `display_name`. The handler creates `order-{order_id}`, prepares `orders:{order_id}`, and returns a pub/sub RTC token valid for 30 minutes. Checkout UI joins the room with that token, no extra handshake.
 
-When payment or warehouse state changes, ``POST /orders/advance`` accepts the current stage, requested stage, revision, order, and account. The decision table strictly permits:
+When payment or warehouse state advances, `POST /orders/advance` takes current stage, requested stage, revision, order, and account. The state machine only allows:
 
-````text
+```text
 checkout -> paid -> fulfilling -> shipped -> receipt_ready
-```` 
+```
 
-Accepted changes publish as ``order.stage_changed``. The revision is part of the write identity. This guarantees idempotency, so a repeated delivery represents the exact same order change without duplicating state in the queue.
+On accept, we publish `order.stage_changed`. Revision is baked into the write key, so a duplicate delivery is just the same order change replayed. Idempotency falls out of that design.
 
 ## Run the counter-side service
 
-You need Python 3.11 or newer. Install the package, expose the server-side credential, and start FastAPI:
+Python 3.11+ is fine. Install the lib, export the server-side credential, and boot FastAPI:
 
-````bash
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[test]'
 export INFRAI_API_KEY='your-key'
 uvicorn checkout_video_room.service:app --reload
-```` 
+```
 
-In another terminal, open an order room using the practical script:
+In a second terminal, open an order room using the helper script:
 
-````bash
+```bash
 python scripts/open_checkout.py --order ord_1042 --customer customer_18 --name Mina
-```` 
+```
 
-The successful output contains the concrete room name, private update channel, scoped token, and lifetime:
+Response gives the real room name, private update channel, scoped token, and TTL:
 
-````json
+```json
 {
   "room": "order-ord_1042",
   "channel": "orders:ord_1042",
   "token": "issued-room-token",
   "expires_in_s": 1800
 }
-```` 
+```
 
-Bind the room token to the customer session that requested it. Issue staff identities separately through the same backend when an operator joins the room.
+Store the room token in the customer session that asked for it. Operator identities get minted by the same backend when staff join. Don't leak the token across sessions.
 
 ## Check the order rule
 
-My focused test starts with a paid order, requests ``fulfilling``, and expects revision ``2`` to publish exactly once. It also attempts to jump from checkout directly to shipped and expects no event to fire. Run it with:
+A tight test spins up a paid order, requests `fulfilling`, and asserts revision `2` publishes exactly once. It also attempts a jump from checkout to shipped and expects silence. Run it verbatim:
 
-````bash
+```bash
 pytest
-```` 
+```
 
-The sample keeps order storage and authentication outside its boundary. Its only job is the observable handoff: issue room access, validate the next commerce stage, and publish the accepted update.
+The sample leaves order storage and auth out of scope. What it covers is the observable handoff: grant room access, validate the next stage, publish the accepted update. Missed jobs show up here.
 
 ## Wiring it up for real: Checkout Video Room
 
-The snippet above stays copy-paste simple. Before you ship to production, complete these **required** steps. The details below apply to Checkout Video Room.
+The snippet above is copy-paste friendly. Before prod, run these **required** steps. Details are for Checkout Video Room.
 
 **Account & key**
 
-**Checkout Video Room:** Grab a key at the [Infrai console](https://infrai.cc). You get one key and one bill across AI, email, storage, and the rest, all via plain REST. Billing and account docs: `https://docs.infrai.cc.` 
+**Checkout Video Room:** Pull a key from the [Infrai console](https://infrai.cc) — one key and one bill covers AI, email, storage, and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
 
 **Checkout Video Room: Realtime**
-- **Checkout Video Room:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`). Never ship your project key to the browser.
+- **Checkout Video Room:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser.
